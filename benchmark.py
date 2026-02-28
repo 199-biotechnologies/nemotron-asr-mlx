@@ -87,7 +87,7 @@ def main():
     print("[1] Model Loading")
     print("-" * 40)
     t0 = time.time()
-    model = nm.from_pretrained("199-biotechnologies/nemotron-asr-mlx")
+    model = nm.from_pretrained("dboris/nemotron-asr-mlx")
     load_time = time.time() - t0
     print(f"  Model load time:    {load_time:.2f}s")
 

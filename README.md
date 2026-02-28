@@ -27,7 +27,7 @@ pip install nemotron-asr-mlx
 ```python
 from nemotron_asr_mlx import from_pretrained
 
-model = from_pretrained("199-biotechnologies/nemotron-asr-mlx")
+model = from_pretrained("dboris/nemotron-asr-mlx")
 result = model.transcribe("meeting.wav")
 print(result.text)
 ```
@@ -90,7 +90,7 @@ nemotron-asr listen --chunk-ms 80            # lowest latency streaming
 ```python
 from nemotron_asr_mlx import from_pretrained
 
-model = from_pretrained("199-biotechnologies/nemotron-asr-mlx")
+model = from_pretrained("dboris/nemotron-asr-mlx")
 
 # Batch — transcribe a file or numpy array
 result = model.transcribe("audio.wav")

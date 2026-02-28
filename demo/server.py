@@ -31,7 +31,7 @@ def get_model():
         if os.path.isdir(local_path):
             _model = nm.from_pretrained(local_path)
         else:
-            _model = nm.from_pretrained("199-biotechnologies/nemotron-asr-mlx")
+            _model = nm.from_pretrained("dboris/nemotron-asr-mlx")
         print(f"Model loaded in {time.time() - t0:.2f}s")
     return _model
 

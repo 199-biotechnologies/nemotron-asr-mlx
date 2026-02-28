@@ -389,7 +389,7 @@ def from_pretrained(model_id_or_path: str) -> NemotronASR:
     Parameters
     ----------
     model_id_or_path : str
-        Either a HuggingFace model ID (e.g. ``"199-biotechnologies/nemotron-asr-mlx"``)
+        Either a HuggingFace model ID (e.g. ``"dboris/nemotron-asr-mlx"``)
         or a local directory containing ``config.json`` and ``model.safetensors``.
 
     Returns

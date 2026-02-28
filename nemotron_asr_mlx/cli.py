@@ -26,7 +26,7 @@ def transcribe(
         help="Chunk size in ms for streaming mode (0 = batch).",
     ),
     model_id: str = typer.Option(
-        "199-biotechnologies/nemotron-asr-mlx",
+        "dboris/nemotron-asr-mlx",
         "--model",
         help="HuggingFace model ID or local path.",
     ),
@@ -75,7 +75,7 @@ def listen(
         help="Chunk size in milliseconds (80, 160, 560, 1120).",
     ),
     model_id: str = typer.Option(
-        "199-biotechnologies/nemotron-asr-mlx",
+        "dboris/nemotron-asr-mlx",
         "--model",
         help="HuggingFace model ID or local path.",
     ),
