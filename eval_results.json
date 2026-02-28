@@ -1,0 +1,32 @@
+{
+  "machine": "Apple M4 Max, 16-core, 64GB",
+  "model": "dboris/nemotron-asr-mlx",
+  "model_version": "0.1.0",
+  "results": [
+    {
+      "dataset": "LibriSpeech test-clean",
+      "wer": 2.79,
+      "samples": 2620,
+      "audio_hours": 5.4,
+      "inference_s": 254.2,
+      "rtfx": 76.5
+    },
+    {
+      "dataset": "LibriSpeech test-other",
+      "wer": 5.57,
+      "samples": 2939,
+      "audio_hours": 5.34,
+      "inference_s": 257.0,
+      "rtfx": 74.8
+    },
+    {
+      "dataset": "TED-LIUM v3",
+      "wer": 6.25,
+      "samples": 1155,
+      "audio_hours": 2.62,
+      "inference_s": 125.3,
+      "rtfx": 75.2
+    }
+  ],
+  "average_wer": 4.87
+}

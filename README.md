@@ -66,7 +66,27 @@ nemotron-asr listen                          # stream from microphone
 
 ## Benchmark
 
-Tested on Apple Silicon. All times are wall-clock inference only (no I/O).
+### Official WER (Open ASR Leaderboard datasets)
+
+Evaluated on the standard [Open ASR Leaderboard](https://huggingface.co/spaces/hf-audio/open_asr_leaderboard) datasets. Machine: Apple M4 Max, 16-core, 64 GB.
+
+| Dataset | WER | NVIDIA ref | RTFx |
+|---------|-----|-----------|------|
+| LibriSpeech test-clean | **2.79%** | 2.31% | 76.5x |
+| LibriSpeech test-other | **5.57%** | 4.75% | 74.8x |
+| TED-LIUM v3 | **6.25%** | 4.50% | 75.2x |
+| **Average** | **4.87%** | 3.85% | **75.6x** |
+
+NVIDIA reference numbers are from [nemotron-asr-speech-streaming-en-0.6b](https://huggingface.co/nvidia/nemotron-asr-speech-streaming-en-0.6b) at 1120ms chunk size (PyTorch, A100 GPU). Our MLX port runs in batch mode on Apple Silicon.
+
+Run the evaluation yourself:
+
+```bash
+pip install datasets jiwer torchcodec
+python eval_wer.py librispeech-clean librispeech-other tedlium
+```
+
+### Speed benchmark
 
 | Content | Duration | Inference | Speed | Tokens |
 |---------|----------|-----------|-------|--------|
@@ -79,8 +99,6 @@ Tested on Apple Silicon. All times are wall-clock inference only (no I/O).
 | **Total** | **93.0 min** | **59.3s** | **94x** RT | **33,622** |
 
 618.5M parameters. 3.4 GB peak GPU memory. Model loads in 0.1s after first download.
-
-Run your own:
 
 ```bash
 python benchmark.py /path/to/audio/files
