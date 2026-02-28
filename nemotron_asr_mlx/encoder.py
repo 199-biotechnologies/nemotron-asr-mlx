@@ -681,7 +681,7 @@ class FastConformerEncoder(nn.Module):
             cache.cache_last_channel_len,
         )
 
-        new_len = min(cache.cache_last_channel_len + x.shape[1], cache.cache_last_channel.shape[1])
+        new_len = min(cache.cache_last_channel_len + x.shape[1], cache.cache_last_channel.shape[2])
         new_cache = NemotronCache(
             cache_last_channel=updated_attn,
             cache_last_time=updated_conv,

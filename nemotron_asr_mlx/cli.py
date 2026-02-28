@@ -45,6 +45,11 @@ def transcribe(
         "--lm-alpha",
         help="LM interpolation weight (default 0.3).",
     ),
+    ilm_scale: float = typer.Option(
+        0.0,
+        "--ilm-scale",
+        help="Internal LM subtraction weight (0.0 = off). Use with beam search.",
+    ),
 ):
     """Transcribe an audio file."""
     from nemotron_asr_mlx.model import from_pretrained
@@ -59,6 +64,7 @@ def transcribe(
             beam_size=beam_size,
             lm_path=lm,
             lm_alpha=lm_alpha,
+            ilm_scale=ilm_scale,
         )
         typer.echo(result.text)
 

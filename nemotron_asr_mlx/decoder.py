@@ -1,4 +1,4 @@
-"""RNNT decoder — PredictNetwork, JointNetwork, and greedy decode.
+"""RNNT decoder — PredictNetwork, JointNetwork, greedy/beam decode, ILM subtraction.
 
 The predict network is a 2-layer LSTM that models the label history.
 The joint network combines encoder and predict outputs to produce
@@ -6,6 +6,12 @@ logits over the vocabulary (1024 BPE tokens + 1 blank).
 
 Greedy decode implements the standard RNNT loop: for each encoder frame,
 repeatedly run predict->joint->argmax until blank or max_symbols.
+
+ILM (Internal Language Model) subtraction estimates the implicit LM
+learned by the predictor and subtracts it during beam search, allowing
+a stronger external LM to replace it.  See Meng et al. (2021)
+"Internal Language Model Estimation for Domain-Adaptive End-to-End
+Speech Recognition."
 """
 
 from __future__ import annotations
@@ -178,6 +184,61 @@ class JointNetwork(nn.Module):
 
 
 # ------------------------------------------------------------------
+# ILM (Internal Language Model) estimation
+# ------------------------------------------------------------------
+
+
+def estimate_ilm_logprobs(
+    pred_out: mx.array,
+    joint_net: JointNetwork,
+) -> mx.array:
+    """Estimate the internal language model log-probabilities.
+
+    The ILM distribution is obtained by running the predictor output through
+    the joint network with **zero encoder contribution** (Meng et al. 2021).
+    Concretely, the joint network computes::
+
+        logits = output(relu(encoder_proj(enc) + decoder_proj(dec)))
+
+    Setting the encoder projection to zero gives::
+
+        ilm_logits = output(relu(decoder_proj(dec)))
+
+    This isolates the label-history-only distribution that the predictor
+    has implicitly learned.
+
+    The returned log-probs are normalized over the **non-blank vocabulary
+    only** (blank logit excluded before softmax), following the ILME
+    formulation where ILM is a distribution over text tokens, not
+    alignment tokens.
+
+    Parameters
+    ----------
+    pred_out : mx.array
+        Predictor (decoder) output, shape ``[1, 1, decoder_dim]``.
+    joint_net : JointNetwork
+        The joint network (uses decoder_proj and output layers).
+
+    Returns
+    -------
+    mx.array
+        Log-probabilities over the full vocabulary+blank, shape
+        ``[vocab_size+1]``.  The blank position is set to 0.0 (neutral)
+        so that ILM subtraction does not affect the blank score.
+    """
+    dec_proj = joint_net.decoder_proj(pred_out)  # [1, 1, joint_dim]
+    ilm_logits = joint_net.output(nn.relu(dec_proj))  # [1, 1, vocab_size+1]
+    ilm_logits = ilm_logits[0, 0]  # [vocab_size+1]
+
+    # Normalize over non-blank tokens only (Meng et al. ILME formulation).
+    # Set blank to 0.0 so ILM subtraction is neutral for blank transitions.
+    nb_logits = ilm_logits[:BLANK_ID]  # [vocab_size]
+    nb_log_probs = nb_logits - mx.logsumexp(nb_logits)
+    # Reconstruct full array: non-blank log-probs + 0.0 for blank
+    return mx.concatenate([nb_log_probs, mx.zeros((1,))])
+
+
+# ------------------------------------------------------------------
 # Greedy RNNT decode (streaming-compatible)
 # ------------------------------------------------------------------
 
@@ -283,6 +344,7 @@ def beam_search_decode(
     max_symbols: int = 10,
     beam_size: int = 4,
     score_fn: callable | None = None,
+    ilm_scale: float = 0.0,
 ) -> tuple[list[int], tuple[mx.array, mx.array] | None, int]:
     """Beam-search RNNT decoding over encoder frames.
 
@@ -311,6 +373,16 @@ def beam_search_decode(
         Optional external scoring callback.  Called as
         ``score_fn(tokens, new_token) -> float`` and the returned value is
         added to the hypothesis score for non-blank expansions.
+    ilm_scale : float
+        Weight for Internal Language Model subtraction (default 0.0 = off).
+        Typical values: 0.1--0.4.  The ILM distribution is estimated by
+        running the predictor through the joint network with zero encoder
+        contribution, then subtracted from the full joint log-probs::
+
+            effective_score = log_joint - ilm_scale * log_ilm
+
+        This removes the implicit LM learned by the predictor, letting an
+        external LM (via *score_fn*) replace it more effectively.
 
     Returns
     -------
@@ -323,7 +395,7 @@ def beam_search_decode(
     """
     # beam_size=1 without external scoring is exactly greedy decoding.
     # Delegate to avoid subtle differences in blank/max_symbols handling.
-    if beam_size <= 1 and score_fn is None:
+    if beam_size <= 1 and score_fn is None and ilm_scale == 0.0:
         return greedy_decode(
             encoder_output, predict_net, joint_net,
             hidden=hidden, last_token=last_token, max_symbols=max_symbols,
@@ -366,6 +438,12 @@ def beam_search_decode(
                 logits = joint_net(frame, pred_out)  # [1, 1, 1, vocab+1]
                 mx.eval(logits)
                 log_probs = logits[0, 0, 0] - mx.logsumexp(logits[0, 0, 0])
+
+                # --- ILM subtraction ---
+                if ilm_scale > 0.0:
+                    ilm_log_probs = estimate_ilm_logprobs(pred_out, joint_net)
+                    log_probs = log_probs - ilm_scale * ilm_log_probs
+
                 mx.eval(log_probs)
 
                 # Blank transition — hypothesis is done for this frame.

@@ -277,6 +277,7 @@ class NemotronASR(nn.Module):
         beam_size: int = 1,
         lm_path: str | None = None,
         lm_alpha: float = 0.3,
+        ilm_scale: float = 0.0,
     ) -> StreamEvent:
         """Batch-transcribe an audio file or array.
 
@@ -291,6 +292,9 @@ class NemotronASR(nn.Module):
             Only used when beam_size > 1.
         lm_alpha : float
             LM interpolation weight (default 0.3).
+        ilm_scale : float
+            Internal LM subtraction weight (default 0.0 = off).
+            Only used when beam_size > 1.
 
         Returns
         -------
@@ -325,6 +329,7 @@ class NemotronASR(nn.Module):
             self.joint_net,
             beam_size=beam_size,
             score_fn=score_fn,
+            ilm_scale=ilm_scale,
         )
 
         text = self.tokenizer.decode(tokens)

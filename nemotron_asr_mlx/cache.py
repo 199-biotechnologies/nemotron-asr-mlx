@@ -74,7 +74,7 @@ class NemotronCache:
         Uses a fixed-size ring buffer so the array shape never changes.
         Returns a **new** NemotronCache (functional style for mx.compile).
         """
-        cache_size = self.cache_last_channel.shape[1]
+        cache_size = self.cache_last_channel.shape[2]
         n_new = new_kv.shape[0]
 
         # Current valid length (capped at cache_size)
@@ -115,7 +115,7 @@ class NemotronCache:
         Returns shape [cache_last_channel_len, d_model].
         """
         length = self.cache_last_channel_len
-        return self.cache_last_channel[layer_idx, :length, :]
+        return self.cache_last_channel[layer_idx, :, :length, :]
 
     # ------------------------------------------------------------------
     # Convolution cache — FIFO shift register
