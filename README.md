@@ -20,19 +20,49 @@
 
 This is a native [MLX](https://github.com/ml-explore/mlx) port of [NVIDIA's Nemotron-ASR 0.6B](https://huggingface.co/nvidia/nemotron-asr-speech-streaming-en-0.6b) — the cache-aware streaming conformer that processes each audio frame exactly once. No sliding windows, no recomputation, no rewinding. State lives in fixed-size ring buffers so latency stays flat no matter how long you talk.
 
+## Requirements
+
+- Apple Silicon Mac (M1/M2/M3/M4)
+- Python 3.10+
+- [ffmpeg](https://ffmpeg.org/) installed and on PATH (for audio loading)
+
+## Install
+
 ```bash
 pip install nemotron-asr-mlx
 ```
+
+Model weights (~1.2 GB) download automatically on first run from [HuggingFace](https://huggingface.co/dboris/nemotron-asr-mlx).
+
+## Quick Start
 
 ```python
 from nemotron_asr_mlx import from_pretrained
 
 model = from_pretrained("dboris/nemotron-asr-mlx")
 result = model.transcribe("meeting.wav")
-print(result.text)
+print(result.text)    # full transcription string
+print(result.tokens)  # list of BPE token IDs
 ```
 
-That's it. Model downloads on first run (~1.2 GB).
+`transcribe()` accepts a file path (any format ffmpeg supports: wav, mp3, flac, m4a, ogg, opus, webm, mp4, etc.) or a numpy array of float32 PCM samples at 16 kHz.
+
+It returns a `StreamEvent` with these fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `text` | `str` | Full transcription text |
+| `text_delta` | `str` | New text (same as `text` in batch mode) |
+| `tokens` | `list[int]` | BPE token IDs |
+| `is_final` | `bool` | Always `True` in batch mode |
+
+## CLI
+
+```bash
+nemotron-asr transcribe meeting.wav          # transcribe a file
+nemotron-asr transcribe recording.mp3        # any format ffmpeg supports
+nemotron-asr listen                          # stream from microphone
+```
 
 ## Benchmark
 
@@ -67,60 +97,6 @@ Most "streaming" ASR on Mac is either (a) Whisper with overlapping windows repro
 
 The model achieves 2.43% WER on LibriSpeech test-clean, competitive with much larger models.
 
-## Install
-
-```bash
-pip install nemotron-asr-mlx
-```
-
-Python 3.10+ and an Apple Silicon Mac.
-
-## Usage
-
-### CLI
-
-```bash
-nemotron-asr transcribe meeting.wav          # batch transcribe a file
-nemotron-asr listen                          # stream from microphone
-nemotron-asr listen --chunk-ms 80            # lowest latency streaming
-```
-
-### Python API
-
-```python
-from nemotron_asr_mlx import from_pretrained
-
-model = from_pretrained("dboris/nemotron-asr-mlx")
-
-# Batch — transcribe a file or numpy array
-result = model.transcribe("audio.wav")
-print(result.text)
-print(result.tokens)  # BPE token IDs
-
-# Streaming — push audio chunks, get text back incrementally
-session = model.create_stream(chunk_ms=160)
-event = session.push(pcm_chunk)      # StreamEvent with text_delta
-print(event.text_delta, end="")
-final = session.flush()              # final result
-session.reset()                      # reuse for next utterance
-
-# Live mic streaming
-with model.listen(chunk_ms=160) as stream:
-    for event in stream:
-        print(event.text_delta, end="", flush=True)
-```
-
-### StreamEvent
-
-Every `push()` and `flush()` returns a `StreamEvent`:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `text_delta` | `str` | New text since last event |
-| `text` | `str` | Full accumulated text |
-| `is_final` | `bool` | True only from `flush()` |
-| `tokens` | `list[int]` | All accumulated BPE token IDs |
-
 ## Architecture
 
 FastConformer encoder (24 layers, 1024-dim) with 8x depthwise striding subsampling. RNNT decoder with 2-layer LSTM prediction network and joint network. Per-layer-group attention context windows `[[70,13], [70,6], [70,1], [70,0]]` for progressive causal restriction. Greedy decoding with blank suppression.
@@ -129,16 +105,16 @@ Based on [Cache-aware Streaming Conformer](https://arxiv.org/abs/2312.17279) and
 
 ## Live Demo
 
-A browser-based demo with live mic transcription:
+A browser-based demo with live mic transcription. Mic is captured in the terminal via sounddevice; the browser displays the transcript.
 
 ```bash
-pip install websockets
+pip install websockets sounddevice
 python demo/server.py
 ```
 
-Open http://localhost:8765, click Record, and start speaking. Transcription updates in real-time with inference stats.
+Open http://localhost:8765 and click Record.
 
-## Weight conversion
+## Weight Conversion
 
 If you have a `.nemo` checkpoint and want to convert it yourself:
 
@@ -156,9 +132,16 @@ Deliberately minimal:
 - `mlx` — Apple's ML framework
 - `huggingface-hub` — model download
 - `numpy` — mel spectrogram
-- `sounddevice` — mic access (optional)
+- `librosa` — mel filterbank (optional, improves accuracy)
+- `sounddevice` — mic access (for live streaming)
 - `websockets` — live demo server (optional)
 - `typer` — CLI
+
+## Links
+
+- **PyPI**: [nemotron-asr-mlx](https://pypi.org/project/nemotron-asr-mlx/)
+- **HuggingFace**: [dboris/nemotron-asr-mlx](https://huggingface.co/dboris/nemotron-asr-mlx)
+- **Original model**: [nvidia/nemotron-asr-speech-streaming-en-0.6b](https://huggingface.co/nvidia/nemotron-asr-speech-streaming-en-0.6b)
 
 ## License
 
@@ -166,4 +149,4 @@ Apache 2.0
 
 ## Author
 
-[Boris Djordjevic](https://github.com/199-biotechnologies) / [199 Biotechnologies](https://github.com/199-biotechnologies)
+[Boris Djordjevic](https://github.com/199-bio) / [199 Biotechnologies](https://github.com/199-biotechnologies)
