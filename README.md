@@ -149,4 +149,4 @@ Apache 2.0
 
 ## Author
 
-[Boris Djordjevic](https://github.com/199-bio) / [199 Biotechnologies](https://github.com/199-biotechnologies)
+[Boris Djordjevic](https://github.com/199-bio) / [199 Biotechnologies](https://github.com/199-biotechnologies) / [@longevityboris](https://x.com/longevityboris)
