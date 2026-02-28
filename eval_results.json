@@ -4,13 +4,21 @@
   "model_version": "0.1.0",
   "results": [
     {
-      "dataset": "LibriSpeech test-clean",
-      "wer": 2.7,
-      "samples": 2620,
-      "audio_hours": 5.4,
-      "inference_s": 173.3,
-      "rtfx": 112.2
+      "dataset": "LibriSpeech test-other",
+      "wer": 5.52,
+      "samples": 2939,
+      "audio_hours": 5.34,
+      "inference_s": 197.2,
+      "rtfx": 97.5
+    },
+    {
+      "dataset": "TED-LIUM v3",
+      "wer": 6.27,
+      "samples": 1155,
+      "audio_hours": 2.62,
+      "inference_s": 77.3,
+      "rtfx": 121.8
     }
   ],
-  "average_wer": 2.7
+  "average_wer": 5.89
 }

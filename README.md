@@ -81,8 +81,8 @@ Evaluated on the standard [Open ASR Leaderboard](https://huggingface.co/spaces/h
 | Dataset | WER | NVIDIA ref | RTFx |
 |---------|-----|-----------|------|
 | LibriSpeech test-clean | **2.70%** | 2.31% | 112x |
-| LibriSpeech test-other | **5.57%** | 4.75% | — |
-| TED-LIUM v3 | **6.25%** | 4.50% | — |
+| LibriSpeech test-other | **5.52%** | 4.75% | 98x |
+| TED-LIUM v3 | **6.27%** | 4.50% | 122x |
 
 NVIDIA reference numbers are from [nemotron-asr-speech-streaming-en-0.6b](https://huggingface.co/nvidia/nemotron-asr-speech-streaming-en-0.6b) at 1120ms chunk size (PyTorch, A100 GPU). Our MLX port runs in batch mode on Apple Silicon.
 
@@ -97,21 +97,17 @@ python eval_wer.py librispeech-clean librispeech-other tedlium
 
 ### Speed benchmark
 
-| Content | Duration | Inference | Speed | Tokens |
-|---------|----------|-----------|-------|--------|
-| Short conversation | 5s | 0.09s | **55x** RT | 35 |
-| Technical explainer | 98s | 1.04s | **95x** RT | 474 |
-| Audiobook excerpt | 9s | 0.15s | **58x** RT | 57 |
-| Long-form analysis | 25.6 min | 17.0s | **91x** RT | 10,572 |
-| Lecture recording | 36.1 min | 23.5s | **92x** RT | 14,688 |
-| Meeting recording | 29.4 min | 17.6s | **101x** RT | 7,796 |
-| **Total** | **93.0 min** | **59.3s** | **94x** RT | **33,622** |
+Measured on LibriSpeech test-clean, Apple M4 Max, 64 GB.
 
-618.5M parameters. 3.4 GB peak GPU memory. 112x realtime on M4 Max. Model loads in 0.1s after first download.
+| Content | Duration | Inference | Speed |
+|---------|----------|-----------|-------|
+| Short utterances (~3s each, 50 samples) | 4.1 min | 2.7s | **90x** RT |
+| Sentences (~10s each, 50 samples) | 9.7 min | 4.6s | **128x** RT |
+| Paragraphs (~30s each, 20 samples) | 10.0 min | 5.3s | **113x** RT |
+| Long-form (14 min single file) | 14.3 min | 8.2s | **105x** RT |
+| Full test-clean (2,620 samples) | 5.4 hours | 173s | **112x** RT |
 
-```bash
-python benchmark.py /path/to/audio/files
-```
+618.5M parameters. 3.4 GB peak GPU memory. Model loads in 0.1s after first download.
 
 ## Why this exists
 
