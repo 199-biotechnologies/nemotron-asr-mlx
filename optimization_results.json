@@ -1,0 +1,23 @@
+{
+  "machine": "Apple M4 Max, 16-core, 64GB",
+  "samples": 200,
+  "dataset": "librispeech test-clean (subset)",
+  "results": [
+    {
+      "name": "baseline",
+      "wer": 2.75,
+      "rtfx": 85.8,
+      "inference_s": 47.73,
+      "audio_s": 4096.1,
+      "notes": ""
+    },
+    {
+      "name": "reflect+periodic",
+      "wer": 2.67,
+      "rtfx": 82.3,
+      "inference_s": 49.77,
+      "audio_s": 4096.1,
+      "notes": ""
+    }
+  ]
+}
