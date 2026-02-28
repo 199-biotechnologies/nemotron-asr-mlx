@@ -173,8 +173,8 @@ class MultiHeadAttention(nn.Module):
         value: mx.array,
         pos_emb: mx.array | None = None,
         mask: mx.array | None = None,
-        cache: mx.array | None = None,
-    ) -> tuple[mx.array, mx.array | None]:
+        cache: tuple[mx.array, mx.array] | None = None,
+    ) -> tuple[mx.array, tuple[mx.array, mx.array] | None]:
         """Forward pass with optional KV cache for streaming.
 
         Parameters
@@ -184,16 +184,14 @@ class MultiHeadAttention(nn.Module):
         value : [batch, T_k, d_model]
         pos_emb : [1, pos_len, d_model] — relative positional embeddings.
         mask : optional attention mask.
-        cache : [valid_len, d_model] — cached KV activations from previous
-                chunks (already sliced for this layer from NemotronCache).
+        cache : tuple(K, V) — cached PROJECTED KV activations.
+                K, V each [valid_len, d_model].
                 None on first chunk or in batch mode.
 
         Returns
         -------
         output    : [batch, T_q, d_model]
-        new_cache : [new_valid_len, d_model] — the concatenation of cache and
-                    current input (for this layer) to be written back.
-                    None if pos_emb is None (batch mode).
+        new_cache : tuple(K, V) — updated projected KV.
         """
         batch = query.shape[0]
         T_q = query.shape[1]
@@ -202,25 +200,29 @@ class MultiHeadAttention(nn.Module):
         k = self.linear_k(key)
         v = self.linear_v(value)
 
-        # NeMo caches pre-attention activations (layer output from previous
-        # chunks). We project them to K, V here alongside the current input.
-        if cache is not None and cache.shape[0] > 0:
-            # cache: [valid_len, d_model] — project to K, V
-            cache_k = self.linear_k(mx.expand_dims(cache, 0))  # [1, valid_len, d_model]
-            cache_v = self.linear_v(mx.expand_dims(cache, 0))  # [1, valid_len, d_model]
-            # Broadcast to batch size
+        if cache is not None:
+            prev_k, prev_v = cache
+            # prev_k: [valid_len, d_model]
+            # k: [batch, T_q, d_model]
             if batch > 1:
-                cache_k = mx.broadcast_to(cache_k, (batch,) + cache_k.shape[1:])
-                cache_v = mx.broadcast_to(cache_v, (batch,) + cache_v.shape[1:])
-            k = mx.concatenate([cache_k, k], axis=1)
-            v = mx.concatenate([cache_v, v], axis=1)
+                # We assume single-stream or same valid_len for batch
+                pk = mx.broadcast_to(mx.expand_dims(prev_k, 0), (batch,) + prev_k.shape)
+                pv = mx.broadcast_to(mx.expand_dims(prev_v, 0), (batch,) + prev_v.shape)
+                k = mx.concatenate([pk, k], axis=1)
+                v = mx.concatenate([pv, v], axis=1)
+            else:
+                k = mx.concatenate([mx.expand_dims(prev_k, 0), k], axis=1)
+                v = mx.concatenate([mx.expand_dims(prev_v, 0), v], axis=1)
 
         T_k = k.shape[1]
+        
+        # Capture full projected KV to return
+        new_cache = (k[0], v[0]) if batch == 1 else (k[0], v[0]) # simplified for single-stream
 
         # Reshape to [B, H, T, head_dim]
         q = q.reshape(batch, T_q, self.n_heads, self.head_dim)
-        k = k.reshape(batch, T_k, self.n_heads, self.head_dim).transpose(0, 2, 1, 3)
-        v = v.reshape(batch, T_k, self.n_heads, self.head_dim).transpose(0, 2, 1, 3)
+        k_heads = k.reshape(batch, T_k, self.n_heads, self.head_dim).transpose(0, 2, 1, 3)
+        v_heads = v.reshape(batch, T_k, self.n_heads, self.head_dim).transpose(0, 2, 1, 3)
 
         if pos_emb is not None:
             # Relative positional attention (Transformer-XL decomposition)
@@ -247,19 +249,18 @@ class MultiHeadAttention(nn.Module):
                 expanded_mask = mx.expand_dims(mask, 0)
                 matrix_bd = mx.where(expanded_mask, mx.array(-1e9), matrix_bd)
 
-            # AC + BD via scaled_dot_product_attention (AC is computed internally)
+            # AC + BD via scaled_dot_product_attention
             output = mx.fast.scaled_dot_product_attention(
-                q_u, k, v, scale=self.scale, mask=matrix_bd
+                q_u, k_heads, v_heads, scale=self.scale, mask=matrix_bd
             )
         else:
-            # Standard attention without positional bias (fallback)
+            # Standard attention without positional bias
             q = q.transpose(0, 2, 1, 3)
             output = mx.fast.scaled_dot_product_attention(
-                q, k, v, scale=self.scale, mask=mask
+                q, k_heads, v_heads, scale=self.scale, mask=mask
             )
 
         output = output.transpose(0, 2, 1, 3).reshape(batch, T_q, -1)
         output = self.linear_out(output)
 
-        # new_cache is built by the caller (ConformerBlock) from the layer input
-        return output, None
+        return output, new_cache

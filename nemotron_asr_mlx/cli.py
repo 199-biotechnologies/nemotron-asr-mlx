@@ -30,6 +30,21 @@ def transcribe(
         "--model",
         help="HuggingFace model ID or local path.",
     ),
+    beam_size: int = typer.Option(
+        1,
+        "--beam-size",
+        help="Beam width for decoding. 1 = greedy (fastest).",
+    ),
+    lm: str = typer.Option(
+        None,
+        "--lm",
+        help="Path to KenLM ARPA/binary model for shallow fusion.",
+    ),
+    lm_alpha: float = typer.Option(
+        0.3,
+        "--lm-alpha",
+        help="LM interpolation weight (default 0.3).",
+    ),
 ):
     """Transcribe an audio file."""
     from nemotron_asr_mlx.model import from_pretrained
@@ -39,7 +54,12 @@ def transcribe(
     if chunk_ms > 0:
         _streaming_transcribe(model, file, chunk_ms)
     else:
-        result = model.transcribe(str(file))
+        result = model.transcribe(
+            str(file),
+            beam_size=beam_size,
+            lm_path=lm,
+            lm_alpha=lm_alpha,
+        )
         typer.echo(result.text)
 
 

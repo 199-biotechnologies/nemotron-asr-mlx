@@ -140,12 +140,15 @@ def _fixup_mlx_key(key: str) -> str:
 # ------------------------------------------------------------------
 
 def _should_transpose_conv(key: str) -> bool:
-    """True for Conv2d / Conv1d weight keys in the encoder or CTC decoder."""
-    if "conv" in key or "ctc_decoder" in key:
-        return True
-    if key == "decoder.decoder_layers.0.weight":
-        return True
-    return False
+    """True for Conv2d / Conv1d weight keys."""
+    return "conv" in key or "ctc_decoder" in key or "subsampling" in key
+
+
+def _should_transpose_linear(key: str) -> bool:
+    """True for Linear and LSTM weight keys (PyTorch [out, in] -> MLX [in, out])."""
+    if "bias" in key or "norm" in key or "embed" in key:
+        return False
+    return "weight" in key or ".Wx" in key or ".Wh" in key
 
 
 def _transform_tensor(key: str, tensor: "np.ndarray") -> "np.ndarray":
@@ -153,10 +156,15 @@ def _transform_tensor(key: str, tensor: "np.ndarray") -> "np.ndarray":
     if _should_transpose_conv(key):
         if tensor.ndim == 4:
             # PyTorch Conv2d: [out, in, H, W] -> MLX: [out, H, W, in]
-            tensor = tensor.transpose(0, 2, 3, 1)
+            return tensor.transpose(0, 2, 3, 1)
         elif tensor.ndim == 3:
             # PyTorch Conv1d: [out, in, K] -> MLX: [out, K, in]
-            tensor = tensor.transpose(0, 2, 1)
+            return tensor.transpose(0, 2, 1)
+    
+    if _should_transpose_linear(key):
+        if tensor.ndim == 2:
+            return tensor.transpose(1, 0)
+            
     return tensor
 
 

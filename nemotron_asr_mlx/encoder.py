@@ -204,9 +204,9 @@ class ConformerBlock(nn.Module):
         x: mx.array,
         pos_emb: mx.array | None = None,
         mask: mx.array | None = None,
-        attn_cache: mx.array | None = None,
+        attn_cache: tuple[mx.array, mx.array] | None = None,
         conv_cache: mx.array | None = None,
-    ) -> tuple[mx.array, mx.array | None, mx.array | None]:
+    ) -> tuple[mx.array, tuple[mx.array, mx.array] | None, mx.array | None]:
         """Forward pass.
 
         Parameters
@@ -214,13 +214,14 @@ class ConformerBlock(nn.Module):
         x          : [batch, time, d_model]
         pos_emb    : positional embeddings
         mask       : attention mask
-        attn_cache : [valid_len, d_model] — cached activations for attention
+        attn_cache : tuple(K, V) — cached PROJECTED KV activations.
+                     K, V each [valid_len, d_model].
         conv_cache : [d_model, K-1] — cached activations for convolution
 
         Returns
         -------
         output         : [batch, time, d_model]
-        new_attn_cache : [new_valid_len, d_model] or None
+        new_attn_cache : tuple(K, V) — updated projected KV.
         new_conv_cache : [d_model, K-1] or None
         """
         # FF1 (half-step residual)
@@ -228,7 +229,7 @@ class ConformerBlock(nn.Module):
 
         # Self-attention with cache
         x_norm = self.norm_attn(x)
-        attn_out, _ = self.self_attn(
+        attn_out, new_attn_cache = self.self_attn(
             x_norm, x_norm, x_norm,
             pos_emb=pos_emb,
             mask=mask,
@@ -245,7 +246,7 @@ class ConformerBlock(nn.Module):
 
         x = self.norm_out(x)
 
-        return x, None, new_conv_cache
+        return x, new_attn_cache, new_conv_cache
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -616,65 +617,74 @@ class FastConformerEncoder(nn.Module):
         x, pos_emb = self.pos_enc(x, offset=offset)
 
         # ── Step 3: Process each layer with caches ──
-        # All layers share cache_last_channel_len. We snapshot it before the
-        # loop so every layer reads the same cached context, then write the
-        # updated per-layer arrays and bump the length once at the end.
-        orig_len = cache.cache_last_channel_len
-        cache_size = cache.cache_last_channel.shape[1]
-        n_new = x.shape[1]
+        # Define the layer-by-layer sequential processing.
+        # We must keep this sequential because each layer depends on the output
+        # of the previous layer.
+        
+        if not hasattr(self, "_compiled_step"):
+            def _step(x_in, pos_emb_in, attn_cache_in, conv_cache_in, orig_len_in):
+                cache_size = attn_cache_in.shape[2]
+                n_new = x_in.shape[1]
+                
+                curr_x = x_in
+                new_attns = []
+                new_convs = []
 
-        # Accumulate updated cache arrays
-        new_channel = cache.cache_last_channel
-        new_time = cache.cache_last_time
+                for i, layer in enumerate(self.layers):
+                    # Slice per-layer caches (K and V)
+                    l_k_cache = attn_cache_in[i, 0, :orig_len_in, :]
+                    l_v_cache = attn_cache_in[i, 1, :orig_len_in, :]
+                    l_attn_cache = (l_k_cache, l_v_cache)
+                    
+                    l_conv_cache = conv_cache_in[i]
 
-        for i, layer in enumerate(self.layers):
-            # Read per-layer caches using the original (pre-chunk) length
-            attn_cache = cache.cache_last_channel[i, :orig_len, :]  # [orig_len, d_model]
-            conv_cache = new_time[i]  # [d_model, K-1]
+                    # WE MUST CAPTURE THE INPUT TO THIS LAYER FOR THE CACHE
+                    # Wait! MultiHeadAttention projects the input and returns
+                    # the full projected KV (including past).
+                    # So we just pass the updated KV back to the cache.
+                    
+                    curr_x, new_l_kv, new_l_conv = layer(
+                        curr_x,
+                        pos_emb=pos_emb_in,
+                        attn_cache=l_attn_cache,
+                        conv_cache=l_conv_cache,
+                    )
 
-            x, _, new_conv_cache = layer(
-                x,
-                pos_emb=pos_emb,
-                attn_cache=attn_cache,
-                conv_cache=conv_cache,
-            )
+                    # Update per-layer attention cache (K and V)
+                    new_k, new_v = new_l_kv # [T_k_full, d_model]
+                    
+                    # Compute new ring buffer state for K and V
+                    def update_single_cache(old_buf, new_full):
+                        if orig_len_in + n_new <= cache_size:
+                            indices = mx.arange(orig_len_in, orig_len_in + n_new)
+                            # new_full contains [prev_k, current_k]
+                            current_data = new_full[-n_new:]
+                            return old_buf.at[indices].add(current_data - old_buf[indices])
+                        else:
+                            return new_full[-cache_size:]
 
-            # Write this layer's output into the attention cache ring buffer
-            layer_out = x.squeeze(0)  # [T', d_model]
-            layer_buf = cache.cache_last_channel[i]  # [cache_size, d_model]
+                    updated_k = update_single_cache(attn_cache_in[i, 0], new_k)
+                    updated_v = update_single_cache(attn_cache_in[i, 1], new_v)
+                    
+                    new_attns.append(mx.stack([updated_k, updated_v], axis=0))
+                    new_convs.append(new_l_conv)
 
-            if orig_len + n_new <= cache_size:
-                # Cache not full: append at orig_len
-                indices = mx.arange(orig_len, orig_len + n_new)
-                layer_buf = layer_buf.at[indices].add(
-                    layer_out - layer_buf[indices]
-                )
-            else:
-                # Cache full: shift left, write new at end
-                keep = cache_size - n_new
-                if keep > 0:
-                    # Take last `keep` valid entries + all new entries
-                    start = min(orig_len, cache_size)
-                    layer_buf = mx.concatenate(
-                        [layer_buf[start - keep : start], layer_out], axis=0
-                    )[-cache_size:]
-                else:
-                    layer_buf = layer_out[-cache_size:]
+                return curr_x, mx.stack(new_attns, axis=0), mx.stack(new_convs, axis=0)
+            
+            self._compiled_step = mx.compile(_step)
 
-            new_channel = new_channel.at[i].add(
-                layer_buf - new_channel[i]
-            )
+        x, updated_attn, updated_conv = self._compiled_step(
+            x,
+            pos_emb,
+            cache.cache_last_channel,
+            cache.cache_last_time,
+            cache.cache_last_channel_len,
+        )
 
-            # Update conv cache
-            if new_conv_cache is not None:
-                new_time = new_time.at[i].add(
-                    new_conv_cache - new_time[i]
-                )
-
-        new_len = min(orig_len + n_new, cache_size)
+        new_len = min(cache.cache_last_channel_len + x.shape[1], cache.cache_last_channel.shape[1])
         new_cache = NemotronCache(
-            cache_last_channel=new_channel,
-            cache_last_time=new_time,
+            cache_last_channel=updated_attn,
+            cache_last_time=updated_conv,
             cache_last_channel_len=new_len,
             decoder_hidden=cache.decoder_hidden,
             decoder_last_token=cache.decoder_last_token,

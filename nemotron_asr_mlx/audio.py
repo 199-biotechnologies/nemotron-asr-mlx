@@ -91,7 +91,7 @@ def get_logmel(
     audio: np.ndarray | mx.array,
     config: MelConfig | None = None,
 ) -> mx.array:
-    """Compute log-mel spectrogram.
+    """Compute log-mel spectrogram using MLX operations.
 
     Parameters
     ----------
@@ -105,36 +105,73 @@ def get_logmel(
     if config is None:
         config = MelConfig()
 
-    # Work in numpy for the STFT (simple, proven, avoids mx fft edge-cases)
-    if isinstance(audio, mx.array):
-        x = np.array(audio, dtype=np.float32)
+    if isinstance(audio, np.ndarray):
+        x = mx.array(audio)
     else:
-        x = np.asarray(audio, dtype=np.float32)
+        x = audio
 
     # Pre-emphasis
     if config.preemphasis > 0:
-        x = np.concatenate([x[:1], x[1:] - config.preemphasis * x[:-1]])
+        x = mx.concatenate([x[:1], x[1:] - config.preemphasis * x[:-1]])
 
     # STFT
-    win = _window(config.window, config.win_length)
-    S = _stft_np(x, config.n_fft, config.hop_length, config.win_length, win)
+    win = mx.array(_window(config.window, config.win_length))
+    S = _stft_mx(x, config.n_fft, config.hop_length, config.win_length, win)
 
     # Power spectrum
-    power = np.abs(S) ** config.mag_power  # [T, n_fft//2 + 1]
+    power = mx.abs(S) ** config.mag_power  # [T, n_fft//2 + 1]
 
     # Mel filterbank
-    fb = config.filterbank  # [n_mels, n_fft//2 + 1]
-    mel = fb @ power.T  # [n_mels, T]
+    fb = mx.array(config.filterbank)  # [n_mels, n_fft//2 + 1]
+    mel = mx.matmul(fb, power.T)  # [n_mels, T]
 
     # Log (NeMo uses log_zero_guard_value = 2**-24 ≈ 5.96e-8)
-    log_mel = np.log(mel + 2**-24)  # [n_mels, T]
-
-    # Nemotron uses normalize="NA" — no normalisation applied.
+    log_mel = mx.log(mel + 2**-24)  # [n_mels, T]
 
     # Transpose to [T, n_mels] and add batch dim
-    log_mel = log_mel.T[np.newaxis, :, :]  # [1, T, n_mels]
+    log_mel = log_mel.T[None, :, :]  # [1, T, n_mels]
 
-    return mx.array(log_mel, dtype=mx.float32)
+    return log_mel
+
+
+def _stft_mx(
+    x: mx.array,
+    n_fft: int,
+    hop_length: int,
+    win_length: int,
+    window: mx.array,
+) -> mx.array:
+    """Real-valued STFT using MLX. Returns complex array [T, n_fft//2+1]."""
+    # Zero-pad so first frame is centred
+    pad_len = n_fft // 2
+    x = mx.pad(x, [(pad_len, pad_len)])
+
+    # Center-pad window to n_fft if needed
+    if win_length < n_fft:
+        left = (n_fft - win_length) // 2
+        right = n_fft - win_length - left
+        window = mx.pad(window, [(left, right)])
+    elif win_length > n_fft:
+        window = window[:n_fft]
+
+    # Frame the signal
+    # Use as_strided style framing via reshaping if possible,
+    # or just use manual slicing if T is small.
+    # MLX doesn't have as_strided, but we can use pad and reshape for fixed stride.
+    
+    n_frames = 1 + (x.shape[0] - n_fft) // hop_length
+    
+    # Efficient framing in MLX:
+    # We want indices:
+    # [[0, 1, ..., n_fft-1],
+    #  [hop, hop+1, ..., hop+n_fft-1],
+    #  ...]
+    idx = mx.arange(n_fft) + mx.arange(n_frames)[:, None] * hop_length
+    frames = x[idx] # [n_frames, n_fft]
+
+    # Apply window and FFT
+    windowed = frames * window
+    return mx.fft.rfft(windowed, n=n_fft)
 
 
 # ------------------------------------------------------------------
@@ -143,7 +180,12 @@ def get_logmel(
 
 @functools.lru_cache(maxsize=4)
 def _window(name: str, length: int) -> np.ndarray:
-    """Return a window function as a numpy array."""
+    """Return a *periodic* window function as a numpy array.
+
+    NeMo / PyTorch use periodic windows (``torch.hann_window(N)`` defaults to
+    ``periodic=True``).  NumPy's ``np.hanning(N)`` is *symmetric*.  To get the
+    periodic variant we compute ``np.hanning(N+1)[:-1]``.
+    """
     funcs = {
         "hann": np.hanning,
         "hanning": np.hanning,
@@ -154,7 +196,8 @@ def _window(name: str, length: int) -> np.ndarray:
     fn = funcs.get(name)
     if fn is None:
         raise ValueError(f"Unknown window type: {name}")
-    return fn(length).astype(np.float32)
+    # Periodic window: take first N points of a length-(N+1) symmetric window
+    return fn(length + 1).astype(np.float32)[:-1]
 
 
 def _stft_np(
@@ -169,9 +212,11 @@ def _stft_np(
     pad_len = n_fft // 2
     x = np.pad(x, (pad_len, pad_len), mode="constant")
 
-    # Right-pad window to n_fft if needed (matches PyTorch STFT convention)
+    # Center-pad window to n_fft if needed (matches PyTorch STFT convention)
     if win_length < n_fft:
-        window = np.pad(window, (0, n_fft - win_length))
+        left = (n_fft - win_length) // 2
+        right = n_fft - win_length - left
+        window = np.pad(window, (left, right))
     elif win_length > n_fft:
         window = window[:n_fft]
 

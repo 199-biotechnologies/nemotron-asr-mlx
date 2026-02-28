@@ -22,6 +22,7 @@ from nemotron_asr_mlx.decoder import (
     BLANK_ID,
     JointNetwork,
     PredictNetwork,
+    beam_search_decode,
     greedy_decode,
 )
 from nemotron_asr_mlx.encoder import FastConformerEncoder
@@ -270,13 +271,26 @@ class NemotronASR(nn.Module):
         """
         return StreamSession(self, chunk_ms=chunk_ms)
 
-    def transcribe(self, path_or_audio) -> StreamEvent:
+    def transcribe(
+        self,
+        path_or_audio,
+        beam_size: int = 1,
+        lm_path: str | None = None,
+        lm_alpha: float = 0.3,
+    ) -> StreamEvent:
         """Batch-transcribe an audio file or array.
 
         Parameters
         ----------
         path_or_audio : str | Path | numpy.ndarray | mx.array
             Path to an audio file, or raw PCM samples (float32, 16 kHz).
+        beam_size : int
+            Beam width for decoding. 1 = greedy (default, fastest).
+        lm_path : str | None
+            Path to a KenLM ARPA or binary model for shallow fusion.
+            Only used when beam_size > 1.
+        lm_alpha : float
+            LM interpolation weight (default 0.3).
 
         Returns
         -------
@@ -297,10 +311,20 @@ class NemotronASR(nn.Module):
 
         encoded, enc_len = self.encoder(mel, length)
 
-        tokens, _, _ = greedy_decode(
+        # Build LM score function if requested
+        score_fn = None
+        if lm_path is not None and beam_size > 1:
+            from nemotron_asr_mlx.lm import NgramLM
+
+            lm = NgramLM(lm_path, tokenizer=self.tokenizer)
+            score_fn = lm.make_score_fn(alpha=lm_alpha)
+
+        tokens, _, _ = beam_search_decode(
             encoded,
             self.predict_net,
             self.joint_net,
+            beam_size=beam_size,
+            score_fn=score_fn,
         )
 
         text = self.tokenizer.decode(tokens)

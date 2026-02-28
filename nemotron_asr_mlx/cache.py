@@ -15,8 +15,8 @@ class NemotronCache:
     """Holds all persistent state for streaming inference.
 
     Shapes (batch dimension omitted — single-stream only):
-        cache_last_channel : [n_layers, cache_size, d_model]
-            Ring buffer of past self-attention activations per layer.
+        cache_last_channel : [n_layers, 2, cache_size, d_model]
+            Ring buffer of projected KV activations. [:, 0, ...] is K, [:, 1, ...] is V.
         cache_last_time    : [n_layers, d_model, conv_context]
             FIFO buffer of trailing conv activations per layer.
         cache_last_channel_len : int
@@ -48,7 +48,7 @@ class NemotronCache:
         pred_rnn_layers: int = 2,
     ) -> "NemotronCache":
         """Create a zero-initialised cache for the start of a stream."""
-        cache_last_channel = mx.zeros((n_layers, cache_size, d_model))
+        cache_last_channel = mx.zeros((n_layers, 2, cache_size, d_model))
         cache_last_time = mx.zeros((n_layers, d_model, conv_context))
         decoder_hidden = tuple(
             (mx.zeros((1, pred_hidden)), mx.zeros((1, pred_hidden)))
