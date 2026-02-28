@@ -127,6 +127,17 @@ FastConformer encoder (24 layers, 1024-dim) with 8x depthwise striding subsampli
 
 Based on [Cache-aware Streaming Conformer](https://arxiv.org/abs/2312.17279) and the [NeMo](https://github.com/NVIDIA/NeMo) toolkit.
 
+## Live Demo
+
+A browser-based demo with live mic transcription:
+
+```bash
+pip install websockets
+python demo/server.py
+```
+
+Open http://localhost:8765, click Record, and start speaking. Transcription updates in real-time with inference stats.
+
 ## Weight conversion
 
 If you have a `.nemo` checkpoint and want to convert it yourself:
@@ -146,6 +157,7 @@ Deliberately minimal:
 - `huggingface-hub` — model download
 - `numpy` — mel spectrogram
 - `sounddevice` — mic access (optional)
+- `websockets` — live demo server (optional)
 - `typer` — CLI
 
 ## License

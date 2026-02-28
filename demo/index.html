@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nemotron ASR MLX</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro', system-ui, sans-serif;
+    background: #0a0a0a;
+    color: #e0e0e0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  .header {
+    padding: 32px 24px 16px;
+    text-align: center;
+  }
+  .header h1 {
+    font-size: 20px;
+    font-weight: 600;
+    color: #fff;
+    letter-spacing: -0.5px;
+  }
+  .header h1 span { color: #00b4d8; }
+  .header .sub {
+    font-size: 13px;
+    color: #666;
+    margin-top: 4px;
+  }
+
+  .main {
+    flex: 1;
+    width: 100%;
+    max-width: 720px;
+    padding: 0 24px;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .transcript-box {
+    flex: 1;
+    min-height: 300px;
+    background: #111;
+    border: 1px solid #222;
+    border-radius: 12px;
+    padding: 24px;
+    margin: 16px 0;
+    overflow-y: auto;
+    font-size: 18px;
+    line-height: 1.7;
+    color: #f0f0f0;
+    transition: border-color 0.3s;
+  }
+  .transcript-box.active { border-color: #00b4d8; }
+  .transcript-box .placeholder {
+    color: #444;
+    font-style: italic;
+  }
+  .transcript-box .cursor {
+    display: inline-block;
+    width: 2px;
+    height: 1.1em;
+    background: #00b4d8;
+    margin-left: 2px;
+    vertical-align: text-bottom;
+    animation: blink 1s step-end infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  .controls {
+    display: flex;
+    gap: 12px;
+    justify-content: center;
+    align-items: center;
+    padding: 16px 0;
+  }
+
+  button {
+    padding: 12px 32px;
+    border: none;
+    border-radius: 8px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  button:active { transform: scale(0.97); }
+
+  .btn-record {
+    background: #00b4d8;
+    color: #000;
+  }
+  .btn-record:hover { background: #00c9f0; }
+  .btn-record.recording {
+    background: #e63946;
+    color: #fff;
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(230,57,70,0.4); }
+    50% { box-shadow: 0 0 0 12px rgba(230,57,70,0); }
+  }
+
+  .btn-clear {
+    background: #222;
+    color: #888;
+  }
+  .btn-clear:hover { background: #333; color: #aaa; }
+
+  .stats {
+    display: flex;
+    gap: 24px;
+    justify-content: center;
+    padding: 8px 0 24px;
+    font-size: 12px;
+    color: #555;
+    font-variant-numeric: tabular-nums;
+  }
+  .stats .val { color: #00b4d8; font-weight: 600; }
+
+  .settings {
+    display: flex;
+    gap: 16px;
+    justify-content: center;
+    align-items: center;
+    padding: 0 0 8px;
+    font-size: 12px;
+    color: #555;
+  }
+  .settings label { display: flex; align-items: center; gap: 6px; }
+  .settings select, .settings input {
+    background: #1a1a1a;
+    border: 1px solid #333;
+    color: #ccc;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+  }
+
+  .status {
+    text-align: center;
+    font-size: 12px;
+    color: #444;
+    padding: 4px 0;
+  }
+  .status.connected { color: #2a9d8f; }
+  .status.error { color: #e63946; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>NEMOTRON <span>ASR</span> MLX</h1>
+  <div class="sub">94x realtime speech recognition on Apple Silicon</div>
+</div>
+
+<div class="main">
+  <div class="settings">
+    <label>
+      Update interval
+      <select id="interval">
+        <option value="3">Fast (300ms)</option>
+        <option value="5" selected>Normal (500ms)</option>
+        <option value="10">Slow (1s)</option>
+      </select>
+    </label>
+  </div>
+
+  <div class="transcript-box" id="transcript">
+    <span class="placeholder">Click record and start speaking...</span>
+  </div>
+
+  <div class="controls">
+    <button class="btn-record" id="recordBtn" onclick="toggleRecording()">Record</button>
+    <button class="btn-clear" onclick="clearTranscript()">Clear</button>
+  </div>
+
+  <div class="stats">
+    <span>Duration: <span class="val" id="duration">0.0s</span></span>
+    <span>Tokens: <span class="val" id="tokens">0</span></span>
+    <span>Inference: <span class="val" id="inference">—</span></span>
+    <span>Speed: <span class="val" id="speed">—</span></span>
+  </div>
+
+  <div class="status" id="status">Connecting...</div>
+</div>
+
+<script>
+let ws = null;
+let mediaStream = null;
+let audioContext = null;
+let processor = null;
+let recording = false;
+
+const transcriptEl = document.getElementById('transcript');
+const recordBtn = document.getElementById('recordBtn');
+const statusEl = document.getElementById('status');
+
+function connect() {
+  ws = new WebSocket(`ws://${location.host}`);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    statusEl.textContent = 'Connected';
+    statusEl.className = 'status connected';
+    // Send config
+    const interval = document.getElementById('interval').value;
+    ws.send(JSON.stringify({ type: 'config', interval: parseInt(interval) }));
+  };
+
+  ws.onmessage = (e) => {
+    const data = JSON.parse(e.data);
+    if (data.type === 'transcript' || data.type === 'final') {
+      transcriptEl.innerHTML = escapeHtml(data.text) +
+        (recording ? '<span class="cursor"></span>' : '');
+      transcriptEl.scrollTop = transcriptEl.scrollHeight;
+
+      if (data.duration) document.getElementById('duration').textContent = data.duration + 's';
+      if (data.tokens) document.getElementById('tokens').textContent = data.tokens;
+      if (data.inference_ms) document.getElementById('inference').textContent = data.inference_ms + 'ms';
+      if (data.rtfx) document.getElementById('speed').textContent = data.rtfx + 'x RT';
+
+      if (data.type === 'final') {
+        transcriptEl.innerHTML = escapeHtml(data.text);
+      }
+    } else if (data.type === 'cleared') {
+      transcriptEl.innerHTML = '<span class="placeholder">Click record and start speaking...</span>';
+      document.getElementById('duration').textContent = '0.0s';
+      document.getElementById('tokens').textContent = '0';
+      document.getElementById('inference').textContent = '—';
+      document.getElementById('speed').textContent = '—';
+    }
+  };
+
+  ws.onclose = () => {
+    statusEl.textContent = 'Disconnected — reconnecting...';
+    statusEl.className = 'status error';
+    setTimeout(connect, 2000);
+  };
+
+  ws.onerror = () => {
+    statusEl.textContent = 'Connection error';
+    statusEl.className = 'status error';
+  };
+}
+
+async function toggleRecording() {
+  if (recording) {
+    stopRecording();
+  } else {
+    await startRecording();
+  }
+}
+
+async function startRecording() {
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true }
+    });
+
+    audioContext = new AudioContext({ sampleRate: 16000 });
+    const source = audioContext.createMediaStreamSource(mediaStream);
+
+    // Use ScriptProcessor for simplicity (AudioWorklet would be better for production)
+    const bufferSize = 1600; // 100ms at 16kHz
+    processor = audioContext.createScriptProcessor(bufferSize, 1, 1);
+
+    processor.onaudioprocess = (e) => {
+      if (!recording || !ws || ws.readyState !== WebSocket.OPEN) return;
+      const pcm = e.inputBuffer.getChannelData(0);
+      ws.send(new Float32Array(pcm).buffer);
+    };
+
+    source.connect(processor);
+    processor.connect(audioContext.destination);
+
+    recording = true;
+    recordBtn.textContent = 'Stop';
+    recordBtn.classList.add('recording');
+    transcriptEl.classList.add('active');
+    transcriptEl.innerHTML = '<span class="cursor"></span>';
+
+  } catch (err) {
+    statusEl.textContent = 'Mic access denied: ' + err.message;
+    statusEl.className = 'status error';
+  }
+}
+
+function stopRecording() {
+  recording = false;
+  recordBtn.textContent = 'Record';
+  recordBtn.classList.remove('recording');
+  transcriptEl.classList.remove('active');
+
+  if (processor) { processor.disconnect(); processor = null; }
+  if (audioContext) { audioContext.close(); audioContext = null; }
+  if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+
+  // Request final transcription
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'stop' }));
+  }
+}
+
+function clearTranscript() {
+  if (recording) stopRecording();
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'clear' }));
+  }
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+// Config change
+document.getElementById('interval').addEventListener('change', (e) => {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'config', interval: parseInt(e.target.value) }));
+  }
+});
+
+connect();
+</script>
+
+</body>
+</html>
