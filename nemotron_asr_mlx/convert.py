@@ -100,8 +100,38 @@ def _rename_nemo_key(key: str) -> str:
         suffix = key[len("joint.decoder."):]
         return f"joint_net.decoder_proj.{suffix}"
 
+    # Nemotron uses short prefixes: joint.enc -> joint_net.encoder_proj
+    if key.startswith("joint.enc."):
+        suffix = key[len("joint.enc."):]
+        return f"joint_net.encoder_proj.{suffix}"
+    if key.startswith("joint.pred."):
+        suffix = key[len("joint.pred."):]
+        return f"joint_net.decoder_proj.{suffix}"
+
     # decoder.decoder_layers.* (CTC decoder if present) — keep as-is
     # encoder.* — keep as-is
+    return key
+
+
+def _fixup_mlx_key(key: str) -> str:
+    """Final fixup: align NeMo-convention names with our nn.Module tree.
+
+    NeMo uses long names (feed_forward1, norm_self_att) while our modules
+    use abbreviated attribute names (ff1, norm_attn).
+    """
+    replacements = [
+        # Encoder conformer block attribute names
+        ("feed_forward1.", "ff1."),
+        ("feed_forward2.", "ff2."),
+        ("norm_feed_forward1.", "norm_ff1."),
+        ("norm_feed_forward2.", "norm_ff2."),
+        ("norm_self_att.", "norm_attn."),
+        # LSTM: NeMo has dec_rnn.lstm.weight_ih, which becomes
+        # dec_rnn.lstm.layers.N.Wx — remove the extra .lstm.
+        ("dec_rnn.lstm.", "dec_rnn."),
+    ]
+    for old, new in replacements:
+        key = key.replace(old, new)
     return key
 
 
@@ -172,7 +202,7 @@ def convert_nemo_to_mlx(nemo_path: str, output_dir: str) -> None:
 
     with tempfile.TemporaryDirectory() as tmpdir:
         # 1. Extract .nemo tarball
-        with tarfile.open(nemo_path, "r:gz") as tar:
+        with tarfile.open(nemo_path, "r:*") as tar:
             tar.extractall(tmpdir)
 
         # 2. Locate checkpoint and config
@@ -216,6 +246,9 @@ def convert_nemo_to_mlx(nemo_path: str, output_dir: str) -> None:
 
             # Key rename: LSTM weight/bias names
             new_key = _rename_lstm_key(new_key)
+
+            # Final fixup: align with nn.Module attribute names
+            new_key = _fixup_mlx_key(new_key)
 
             # For LSTM biases: bias_ih and bias_hh map to the same target
             # key and must be summed together.

@@ -126,8 +126,8 @@ def get_logmel(
     fb = config.filterbank  # [n_mels, n_fft//2 + 1]
     mel = fb @ power.T  # [n_mels, T]
 
-    # Log
-    log_mel = np.log(mel + 1e-5)  # [n_mels, T]
+    # Log (NeMo uses log_zero_guard_value = 2**-24 ≈ 5.96e-8)
+    log_mel = np.log(mel + 2**-24)  # [n_mels, T]
 
     # Nemotron uses normalize="NA" — no normalisation applied.
 
@@ -165,11 +165,11 @@ def _stft_np(
     window: np.ndarray,
 ) -> np.ndarray:
     """Real-valued STFT using numpy. Returns complex array [T, n_fft//2+1]."""
-    # Reflect-pad so first frame is centred
+    # Zero-pad so first frame is centred (NeMo uses pad_mode="constant")
     pad_len = n_fft // 2
-    x = np.pad(x, (pad_len, pad_len), mode="reflect")
+    x = np.pad(x, (pad_len, pad_len), mode="constant")
 
-    # Zero-pad window to n_fft if needed
+    # Right-pad window to n_fft if needed (matches PyTorch STFT convention)
     if win_length < n_fft:
         window = np.pad(window, (0, n_fft - win_length))
     elif win_length > n_fft:
@@ -189,10 +189,23 @@ def _stft_np(
 
 
 def _mel_filterbank(sr: int, n_fft: int, n_mels: int) -> np.ndarray:
-    """Compute a Slaney-normalised mel filterbank (no librosa dependency).
+    """Compute a Slaney-normalised mel filterbank.
+
+    Uses librosa (matching NeMo) when available, otherwise falls back
+    to a pure-numpy implementation.
 
     Returns shape [n_mels, n_fft//2 + 1].
     """
+    try:
+        import librosa
+        return librosa.filters.mel(
+            sr=sr, n_fft=n_fft, n_mels=n_mels,
+            fmin=0.0, fmax=sr / 2.0, norm="slaney",
+        ).astype(np.float32)
+    except ImportError:
+        pass
+
+    # Fallback: pure-numpy implementation
     fmin = 0.0
     fmax = sr / 2.0
 

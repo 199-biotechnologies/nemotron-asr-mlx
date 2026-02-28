@@ -98,7 +98,7 @@ class CausalConvModule(nn.Module):
             groups=d_model,
             bias=use_bias,
         )
-        self.batch_norm = nn.BatchNorm(d_model)
+        self.batch_norm = nn.LayerNorm(d_model)
         self.activation = nn.SiLU()
         self.pointwise_conv2 = nn.Conv1d(
             d_model, d_model, kernel_size=1, stride=1, padding=0, bias=use_bias
@@ -141,9 +141,8 @@ class CausalConvModule(nn.Module):
             combined = x_padded  # [batch, K-1 + T, d_model]
             new_cache = combined[0, -self.causal_padding :, :].T  # [d_model, K-1]
         else:
-            # Batch: symmetric padding
-            sym_pad = (self.kernel_size - 1) // 2
-            x_padded = mx.pad(x, ((0, 0), (sym_pad, sym_pad), (0, 0)))
+            # Batch: causal padding (left-only, same as streaming)
+            x_padded = mx.pad(x, ((0, 0), (self.causal_padding, 0), (0, 0)))
             new_cache = None
 
         x = self.depthwise_conv(x_padded)
@@ -283,27 +282,33 @@ class DwStridingSubsampling(nn.Module):
         self._sampling_num = 3  # log2(8) = 3 stages
         self._stride = 2
         self._kernel_size = 3
-        self._padding = (self._kernel_size - 1) // 2  # 1
         self._conv_channels = conv_channels
 
+        # NeMo causal subsampling: asymmetric padding (left=k-1, right=s-1)
+        self._left_padding = self._kernel_size - 1   # 2
+        self._right_padding = self._stride - 1        # 1
+        all_paddings = self._left_padding + self._right_padding  # 3
+
         # Compute final frequency dimension after 3 stages of stride-2
+        # Formula: floor((input + all_paddings - kernel) / stride) + 1
         final_freq = feat_in
         for _ in range(self._sampling_num):
             final_freq = (
                 math.floor(
-                    (final_freq + 2 * self._padding - self._kernel_size) / self._stride
+                    (final_freq + all_paddings - self._kernel_size)
+                    / self._stride
                 )
                 + 1
             )
 
-        # Stage 1: regular Conv2d
+        # Stage 1: regular Conv2d (no built-in padding — applied manually)
         self.conv = [
             nn.Conv2d(
                 in_channels=1,
                 out_channels=conv_channels,
                 kernel_size=self._kernel_size,
                 stride=self._stride,
-                padding=self._padding,
+                padding=0,
             ),
             nn.ReLU(),
         ]
@@ -316,7 +321,7 @@ class DwStridingSubsampling(nn.Module):
                     out_channels=conv_channels,
                     kernel_size=self._kernel_size,
                     stride=self._stride,
-                    padding=self._padding,
+                    padding=0,
                     groups=conv_channels,
                 )
             )
@@ -333,13 +338,29 @@ class DwStridingSubsampling(nn.Module):
 
         self.out = nn.Linear(conv_channels * final_freq, d_model)
 
+    def _causal_pad(self, x: mx.array) -> mx.array:
+        """Apply NeMo causal padding to [B, T, F, C] tensor."""
+        # Pad both time and freq with (left=k-1, right=s-1)
+        return mx.pad(
+            x,
+            pad_width=[
+                (0, 0),                                          # batch
+                (self._left_padding, self._right_padding),       # time
+                (self._left_padding, self._right_padding),       # freq
+                (0, 0),                                          # channels
+            ],
+        )
+
     def _conv_forward(self, x: mx.array) -> mx.array:
-        """Run conv layers. x: [B, C, T, F] (channels-first for Conv2d)."""
+        """Run conv layers. x: [B, C, T, F] (channels-first, NeMo layout)."""
         # MLX Conv2d expects [B, H, W, C] (channels-last)
-        x = x.transpose(0, 2, 3, 1)
+        x = x.transpose(0, 2, 3, 1)  # -> [B, T, F, C]
         for layer in self.conv:
+            if isinstance(layer, nn.Conv2d) and layer.weight.shape[1] > 1:
+                # Striding conv — apply causal padding
+                x = self._causal_pad(x)
             x = layer(x)
-        return x.transpose(0, 3, 1, 2)
+        return x.transpose(0, 3, 1, 2)  # -> [B, C, T', F']
 
     def __call__(
         self,
@@ -358,20 +379,22 @@ class DwStridingSubsampling(nn.Module):
         output  : [batch, time//8, d_model]
         lengths : [batch] — output lengths.
         """
+        all_pad = self._left_padding + self._right_padding
         for _ in range(self._sampling_num):
             lengths = (
                 mx.floor(
-                    (lengths + 2 * self._padding - self._kernel_size) / self._stride
+                    (lengths + all_pad - self._kernel_size) / self._stride
                 )
                 + 1.0
             )
         lengths = lengths.astype(mx.int32)
 
-        # [B, T, F] -> [B, 1, T, F]
-        x = mx.expand_dims(x, axis=1)
+        # NeMo processes mel as [B, 1, T, F] — unsqueeze channel dim
+        x = mx.expand_dims(x, axis=1)     # [B, T, F] -> [B, 1, T, F]
         x = self._conv_forward(x)
-        # x: [B, C, T', F'] -> [B, T', C*F']
-        x = x.swapaxes(1, 2).reshape(x.shape[0], x.shape[2], -1)
+        # x: [B, C, T', F'] -> [B, T', C*F'] (NeMo reshape: transpose(1,2) then flatten)
+        x = x.transpose(0, 2, 1, 3)       # [B, C, T', F'] -> [B, T', C, F']
+        x = x.reshape(x.shape[0], x.shape[1], -1)  # [B, T', C*F']
         x = self.out(x)
 
         return x, lengths
@@ -399,11 +422,12 @@ class DwStridingSubsampling(nn.Module):
             x = mx.concatenate([pre_encode_cache, x], axis=1)
 
         T = x.shape[1]
+        all_pad = self._left_padding + self._right_padding
         # The total stride is 8. We need T to be processable by 3 stride-2
         # stages. Compute how many output frames we'll get:
         out_t = T
         for _ in range(self._sampling_num):
-            out_t = (out_t + 2 * self._padding - self._kernel_size) // self._stride + 1
+            out_t = (out_t + all_pad - self._kernel_size) // self._stride + 1
 
         if out_t <= 0:
             # Not enough frames — cache everything
@@ -414,7 +438,7 @@ class DwStridingSubsampling(nn.Module):
         # Reverse the length calculation to find the minimum input needed
         needed = out_t
         for _ in range(self._sampling_num):
-            needed = (needed - 1) * self._stride + self._kernel_size - 2 * self._padding
+            needed = (needed - 1) * self._stride + self._kernel_size - all_pad
 
         # Cache the remainder
         remainder = T - needed
@@ -482,8 +506,21 @@ class FastConformerEncoder(nn.Module):
 
         self.n_layers = n_layers
         self.d_model = d_model
-        self.att_context_size = att_context_size
-        self.cache_size = att_context_size[0]  # L_c = 70
+
+        # att_context_size can be a flat [left, right] or nested
+        # [[left, right], ...] per layer group. Expand to per-layer list.
+        if isinstance(att_context_size[0], (list, tuple)):
+            # Nested: divide layers evenly among groups
+            n_groups = len(att_context_size)
+            layers_per_group = n_layers // n_groups
+            self._layer_context = []
+            for g, (left, right) in enumerate(att_context_size):
+                count = layers_per_group if g < n_groups - 1 else n_layers - g * layers_per_group
+                self._layer_context.extend([(left, right)] * count)
+        else:
+            self._layer_context = [tuple(att_context_size)] * n_layers
+
+        self.cache_size = self._layer_context[0][0]  # L_c = left context of first layer
 
         self.pre_encode = DwStridingSubsampling(
             feat_in=feat_in,
@@ -494,7 +531,7 @@ class FastConformerEncoder(nn.Module):
         self.pos_enc = RelPositionalEncoding(
             d_model=d_model,
             max_len=pos_emb_max_len,
-            scale_input=True,
+            scale_input=False,  # NeMo xscaling=False
         )
 
         self.layers = [
@@ -528,8 +565,16 @@ class FastConformerEncoder(nn.Module):
         x, out_len = self.pre_encode(audio_signal, length)
         x, pos_emb = self.pos_enc(x)
 
-        for layer in self.layers:
-            x, _, _ = layer(x, pos_emb=pos_emb)
+        T = x.shape[1]
+        # Build attention masks per layer (True = blocked)
+        positions = mx.arange(T)
+        for i, layer in enumerate(self.layers):
+            left, right = self._layer_context[i]
+            # Mask: query at row q, key at col k
+            # Allow if k in [q - left, q + right]
+            diff = mx.expand_dims(positions, 1) - mx.expand_dims(positions, 0)
+            mask = (diff < -right) | (diff > left)  # [T, T] boolean
+            x, _, _ = layer(x, pos_emb=pos_emb, mask=mask)
 
         return x, out_len
 

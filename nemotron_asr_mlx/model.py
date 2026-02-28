@@ -14,6 +14,7 @@ from typing import Iterator
 
 import mlx.core as mx
 import mlx.nn as nn
+import numpy as np
 
 from nemotron_asr_mlx.audio import MelConfig, get_logmel, load_audio
 from nemotron_asr_mlx.cache import NemotronCache
@@ -82,7 +83,8 @@ class StreamSession:
         cfg = model._config
         n_layers = cfg.get("encoder", {}).get("n_layers", 24)
         d_model = cfg.get("encoder", {}).get("d_model", 1024)
-        cache_size = cfg.get("encoder", {}).get("att_context_size", [70, 1])[0]
+        att_ctx = cfg.get("encoder", {}).get("att_context_size", [70, 1])
+        cache_size = att_ctx[0][0] if isinstance(att_ctx[0], (list, tuple)) else att_ctx[0]
         conv_context = cfg.get("encoder", {}).get("kernel_size", 9) - 1
         pred_hidden = cfg.get("decoder", {}).get("pred_hidden", 640)
         pred_rnn_layers = cfg.get("decoder", {}).get("pred_rnn_layers", 2)
@@ -98,6 +100,11 @@ class StreamSession:
 
         self._all_tokens: list[int] = []
         self._prev_text = ""
+
+        # Streaming mel: accumulate PCM and compute mel incrementally
+        # Keep overlap of (n_fft - hop_length) samples for correct STFT
+        self._pcm_buffer = np.zeros(0, dtype=np.float32)
+        self._mel_frames_processed = 0
 
     def push(self, pcm_chunk: mx.array) -> StreamEvent:
         """Process one PCM audio chunk and return a StreamEvent.
@@ -119,8 +126,21 @@ class StreamSession:
             pcm_chunk = pcm_chunk.squeeze(0)
         pcm_np = np.array(pcm_chunk, dtype=np.float32)
 
-        # Compute mel spectrogram for this chunk
-        mel = get_logmel(pcm_np, self._mel_config)  # [1, T, 128]
+        # Accumulate PCM and compute mel over full buffer for correct STFT
+        self._pcm_buffer = np.concatenate([self._pcm_buffer, pcm_np])
+        mel_full = get_logmel(self._pcm_buffer, self._mel_config)  # [1, T_total, 128]
+
+        # Extract only new mel frames (not yet processed)
+        new_start = self._mel_frames_processed
+        if mel_full.shape[1] <= new_start:
+            return StreamEvent(
+                text_delta="",
+                text=self._prev_text,
+                is_final=False,
+                tokens=list(self._all_tokens),
+            )
+        mel = mel_full[:, new_start:, :]
+        self._mel_frames_processed = mel_full.shape[1]
 
         # Encode
         encoded, self._cache = self._model.encoder.stream_step(mel, self._cache)
@@ -188,7 +208,8 @@ class StreamSession:
         cfg = self._model._config
         n_layers = cfg.get("encoder", {}).get("n_layers", 24)
         d_model = cfg.get("encoder", {}).get("d_model", 1024)
-        cache_size = cfg.get("encoder", {}).get("att_context_size", [70, 1])[0]
+        att_ctx = cfg.get("encoder", {}).get("att_context_size", [70, 1])
+        cache_size = att_ctx[0][0] if isinstance(att_ctx[0], (list, tuple)) else att_ctx[0]
         conv_context = cfg.get("encoder", {}).get("kernel_size", 9) - 1
         pred_hidden = cfg.get("decoder", {}).get("pred_hidden", 640)
         pred_rnn_layers = cfg.get("decoder", {}).get("pred_rnn_layers", 2)
@@ -203,6 +224,8 @@ class StreamSession:
         )
         self._all_tokens = []
         self._prev_text = ""
+        self._pcm_buffer = np.zeros(0, dtype=np.float32)
+        self._mel_frames_processed = 0
 
 
 # ------------------------------------------------------------------
@@ -432,7 +455,7 @@ def from_pretrained(model_id_or_path: str) -> NemotronASR:
     # Load weights
     weights_path = model_path / "model.safetensors"
     weights = mx.load(str(weights_path))
-    model.load_weights(list(weights.items()))
+    model.load_weights(list(weights.items()), strict=False)
     mx.eval(model.parameters())
 
     # Build tokenizer — normalize key name from converter output
