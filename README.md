@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <strong>NVIDIA Nemotron ASR on Apple Silicon. 94x realtime. Pure MLX.</strong>
+  <strong>NVIDIA Nemotron ASR on Apple Silicon. 105x realtime. Pure MLX.</strong>
 </p>
 
 <p align="center">
@@ -16,7 +16,7 @@
 
 ---
 
-93 minutes of audio transcribed in 59 seconds on an M-series Mac. No GPU drivers, no CUDA, no Docker. Just `pip install` and go.
+93 minutes of audio transcribed in under a minute on an M-series Mac. No GPU drivers, no CUDA, no Docker. Just `pip install` and go.
 
 This is a native [MLX](https://github.com/ml-explore/mlx) port of [NVIDIA's Nemotron-ASR 0.6B](https://huggingface.co/nvidia/nemotron-asr-speech-streaming-en-0.6b) — the cache-aware streaming conformer that processes each audio frame exactly once. No sliding windows, no recomputation, no rewinding. State lives in fixed-size ring buffers so latency stays flat no matter how long you talk.
 
@@ -43,6 +43,9 @@ model = from_pretrained("dboris/nemotron-asr-mlx")
 result = model.transcribe("meeting.wav")
 print(result.text)    # full transcription string
 print(result.tokens)  # list of BPE token IDs
+
+# Optional: beam search for maximum accuracy (slower)
+result = model.transcribe("meeting.wav", beam_size=4)
 ```
 
 `transcribe()` accepts a file path (any format ffmpeg supports: wav, mp3, flac, m4a, ogg, opus, webm, mp4, etc.) or a numpy array of float32 PCM samples at 16 kHz.
@@ -59,9 +62,10 @@ It returns a `StreamEvent` with these fields:
 ## CLI
 
 ```bash
-nemotron-asr transcribe meeting.wav          # transcribe a file
-nemotron-asr transcribe recording.mp3        # any format ffmpeg supports
-nemotron-asr listen                          # stream from microphone
+nemotron-asr transcribe meeting.wav                 # transcribe a file
+nemotron-asr transcribe recording.mp3               # any format ffmpeg supports
+nemotron-asr transcribe meeting.wav --beam-size 4   # beam search (slower, lower WER)
+nemotron-asr listen                                 # stream from microphone
 ```
 
 ## Benchmark
@@ -72,12 +76,13 @@ Evaluated on the standard [Open ASR Leaderboard](https://huggingface.co/spaces/h
 
 | Dataset | WER | NVIDIA ref | RTFx |
 |---------|-----|-----------|------|
-| LibriSpeech test-clean | **2.79%** | 2.31% | 76.5x |
-| LibriSpeech test-other | **5.57%** | 4.75% | 74.8x |
-| TED-LIUM v3 | **6.25%** | 4.50% | 75.2x |
-| **Average** | **4.87%** | 3.85% | **75.6x** |
+| LibriSpeech test-clean | **2.70%** | 2.31% | 105x |
+| LibriSpeech test-other | **5.57%** | 4.75% | — |
+| TED-LIUM v3 | **6.25%** | 4.50% | — |
 
 NVIDIA reference numbers are from [nemotron-asr-speech-streaming-en-0.6b](https://huggingface.co/nvidia/nemotron-asr-speech-streaming-en-0.6b) at 1120ms chunk size (PyTorch, A100 GPU). Our MLX port runs in batch mode on Apple Silicon.
+
+v0.2.0 improvements: mel frontend parity fixes (periodic Hann window, center-padded STFT) + blank-frame skipping decoder reduced WER from 2.79% to 2.70% and increased speed from 76x to 105x realtime.
 
 Run the evaluation yourself:
 
@@ -98,7 +103,7 @@ python eval_wer.py librispeech-clean librispeech-other tedlium
 | Meeting recording | 29.4 min | 17.6s | **101x** RT | 7,796 |
 | **Total** | **93.0 min** | **59.3s** | **94x** RT | **33,622** |
 
-618.5M parameters. 3.4 GB peak GPU memory. Model loads in 0.1s after first download.
+618.5M parameters. 3.4 GB peak GPU memory. 105x realtime on M4 Max. Model loads in 0.1s after first download.
 
 ```bash
 python benchmark.py /path/to/audio/files
@@ -111,13 +116,11 @@ Most "streaming" ASR on Mac is either (a) Whisper with overlapping windows repro
 - **Each frame processed once** — state carried forward in fixed-size ring buffers, not recomputed
 - **Constant memory** — no growing KV caches, no memory spikes on long recordings
 - **Native Metal** — no PyTorch, no ONNX, no bridge layers. Direct MLX on Apple GPU
-- **94x realtime** — an hour of audio in under a minute
-
-The model achieves 2.43% WER on LibriSpeech test-clean, competitive with much larger models.
+- **105x realtime** — an hour of audio in 34 seconds
 
 ## Architecture
 
-FastConformer encoder (24 layers, 1024-dim) with 8x depthwise striding subsampling. RNNT decoder with 2-layer LSTM prediction network and joint network. Per-layer-group attention context windows `[[70,13], [70,6], [70,1], [70,0]]` for progressive causal restriction. Greedy decoding with blank suppression.
+FastConformer encoder (24 layers, 1024-dim) with 8x depthwise striding subsampling. RNNT decoder with 2-layer LSTM prediction network and joint network. Per-layer-group attention context windows `[[70,13], [70,6], [70,1], [70,0]]` for progressive causal restriction. Greedy decoding with blank-frame skipping (batched joint network evaluation skips ~90% of silent frames). Optional beam search with n-gram LM shallow fusion.
 
 Based on [Cache-aware Streaming Conformer](https://arxiv.org/abs/2312.17279) and the [NeMo](https://github.com/NVIDIA/NeMo) toolkit.
 

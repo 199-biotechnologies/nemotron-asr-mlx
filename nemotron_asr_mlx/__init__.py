@@ -1,4 +1,4 @@
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from nemotron_asr_mlx.cache import NemotronCache
 from nemotron_asr_mlx.model import (
